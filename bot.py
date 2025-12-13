@@ -258,10 +258,25 @@ async def on_ready():
     
     # 同步斜杠命令
     try:
-        synced = await bot.tree.sync()
-        print(f'已同步 {len(synced)} 个斜杠命令')
+        # 如果有配置 GUILD_ID，先同步到特定服务器（更快）
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            print(f'已同步 {len(synced)} 个斜杠命令到服务器 {GUILD_ID}')
+            for cmd in synced:
+                print(f'  - /{cmd.name}: {cmd.description}')
+        else:
+            # 全局同步（可能需要几分钟才能生效）
+            synced = await bot.tree.sync()
+            print(f'已同步 {len(synced)} 个斜杠命令（全局）')
+            print('注意：全局同步可能需要几分钟才能在所有服务器中生效')
+            for cmd in synced:
+                print(f'  - /{cmd.name}: {cmd.description}')
     except Exception as e:
         print(f'同步斜杠命令时出错：{e}')
+        import traceback
+        traceback.print_exc()
 
 @bot.tree.command(name='setup', description='发送体验权限申请面板（仅管理员可用）')
 @app_commands.checks.has_permissions(administrator=True)
@@ -430,6 +445,43 @@ async def check_expired_now(interaction: discord.Interaction):
             f'✨ 没有发现过期权限',
             ephemeral=True
         )
+
+@bot.tree.command(name='sync', description='手动同步斜杠命令（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+async def sync_commands(interaction: discord.Interaction):
+    """手动同步斜杠命令（仅管理员可用）"""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # 如果有配置 GUILD_ID，同步到特定服务器（更快）
+        if GUILD_ID:
+            guild = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            command_list = '\n'.join([f'  - /{cmd.name}: {cmd.description}' for cmd in synced])
+            await interaction.followup.send(
+                f'✅ 已同步 {len(synced)} 个斜杠命令到服务器！\n\n'
+                f'**命令列表：**\n{command_list}\n\n'
+                f'💡 现在可以在 Discord 中输入 `/` 查看这些命令了！',
+                ephemeral=True
+            )
+        else:
+            # 全局同步
+            synced = await bot.tree.sync()
+            command_list = '\n'.join([f'  - /{cmd.name}: {cmd.description}' for cmd in synced])
+            await interaction.followup.send(
+                f'✅ 已同步 {len(synced)} 个斜杠命令（全局）！\n\n'
+                f'**命令列表：**\n{command_list}\n\n'
+                f'⚠️ 注意：全局同步可能需要几分钟才能在所有服务器中生效',
+                ephemeral=True
+            )
+    except Exception as e:
+        await interaction.followup.send(
+            f'❌ 同步命令时出错：{str(e)}',
+            ephemeral=True
+        )
+        import traceback
+        traceback.print_exc()
 
 # 运行机器人
 if __name__ == '__main__':
