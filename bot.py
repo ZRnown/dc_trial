@@ -171,10 +171,26 @@ class ExperienceView(discord.ui.View):
         
         remaining = get_remaining_time(user_info[0])
         if not remaining:
-            await interaction.response.send_message(
-                '⏰ 您的体验时间已结束！',
-                ephemeral=True
-            )
+            # 如果已过期，立即移除身份组
+            guild = interaction.guild
+            role = guild.get_role(VIP_ROLE_ID)
+            if role:
+                removed = await remove_expired_role(user_id, guild, role)
+                if removed:
+                    await interaction.response.send_message(
+                        '⏰ 您的体验时间已结束！身份组已自动移除。',
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        '⏰ 您的体验时间已结束！',
+                        ephemeral=True
+                    )
+            else:
+                await interaction.response.send_message(
+                    '⏰ 您的体验时间已结束！',
+                    ephemeral=True
+                )
         else:
             total_seconds = int(remaining.total_seconds())
             hours = total_seconds // 3600
@@ -190,6 +206,19 @@ class ExperienceView(discord.ui.View):
                 f'⏳ 剩余时长：{hours}小时{minutes}分钟{seconds}秒',
                 ephemeral=True
             )
+
+# 移除单个用户的过期权限
+async def remove_expired_role(user_id, guild, role):
+    """移除单个用户的过期权限"""
+    try:
+        member = guild.get_member(user_id)
+        if member and role in member.roles:
+            await member.remove_roles(role)
+            print(f'已移除用户 {member.name} ({user_id}) 的体验权限')
+            return True
+    except Exception as e:
+        print(f'移除用户 {user_id} 权限时出错：{str(e)}')
+    return False
 
 # 定时任务：检查并移除过期权限
 @tasks.loop(minutes=1)
@@ -215,14 +244,8 @@ async def check_expired_roles():
             
             remaining = get_remaining_time(start_time_str)
             if remaining is None:  # 已过期
-                try:
-                    member = guild.get_member(user_id)
-                    if member and role in member.roles:
-                        await member.remove_roles(role)
-                        print(f'已移除用户 {member.name} ({user_id}) 的体验权限')
-                    # 注意：即使用户离开服务器，也不删除记录，确保每人只有一次机会
-                except Exception as e:
-                    print(f'移除用户 {user_id} 权限时出错：{str(e)}')
+                await remove_expired_role(user_id, guild, role)
+                # 注意：即使用户离开服务器，也不删除记录，确保每人只有一次机会
     except Exception as e:
         print(f'检查过期权限时出错：{str(e)}')
 
@@ -357,6 +380,56 @@ async def check_all_users(interaction: discord.Interaction):
         )
     
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name='checkexpired', description='立即检查并移除所有过期的体验权限（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+async def check_expired_now(interaction: discord.Interaction):
+    """立即检查并移除所有过期的体验权限（仅管理员可用）"""
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send('❌ 无法获取服务器信息', ephemeral=True)
+        return
+    
+    role = guild.get_role(VIP_ROLE_ID)
+    if not role:
+        await interaction.followup.send('❌ 找不到会员身份组，请检查配置！', ephemeral=True)
+        return
+    
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, start_time FROM user_experience WHERE used = 1')
+    users = c.fetchall()
+    conn.close()
+    
+    removed_count = 0
+    checked_count = 0
+    
+    for user_id, start_time_str in users:
+        if not start_time_str:
+            continue
+        
+        checked_count += 1
+        remaining = get_remaining_time(start_time_str)
+        if remaining is None:  # 已过期
+            if await remove_expired_role(user_id, guild, role):
+                removed_count += 1
+    
+    if removed_count > 0:
+        await interaction.followup.send(
+            f'✅ 检查完成！\n'
+            f'📊 检查了 {checked_count} 个用户\n'
+            f'🗑️ 移除了 {removed_count} 个过期权限',
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            f'✅ 检查完成！\n'
+            f'📊 检查了 {checked_count} 个用户\n'
+            f'✨ 没有发现过期权限',
+            ephemeral=True
+        )
 
 # 运行机器人
 if __name__ == '__main__':
