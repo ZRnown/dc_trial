@@ -228,13 +228,29 @@ async def remove_expired_role(user_id, guild, role):
     """移除单个用户的过期权限"""
     try:
         member = guild.get_member(user_id)
-        if member and role in member.roles:
-            await member.remove_roles(role)
-            print(f'已移除用户 {member.name} ({user_id}) 的体验权限')
-            return True
+        if not member:
+            print(f'用户 {user_id} 不在服务器中')
+            return False
+        
+        if role not in member.roles:
+            print(f'用户 {member.name} ({user_id}) 没有该身份组')
+            return False
+        
+        await member.remove_roles(role)
+        print(f'✅ 已移除用户 {member.name} ({user_id}) 的体验权限')
+        return True
+    except discord.Forbidden as e:
+        print(f'❌ 权限不足：无法移除用户 {user_id} 的身份组 - {str(e)}')
+        print(f'   提示：确保机器人的身份组在服务器身份组列表中位于会员身份组之上')
+        return False
+    except discord.HTTPException as e:
+        print(f'❌ HTTP错误：移除用户 {user_id} 权限时出错 - {str(e)}')
+        return False
     except Exception as e:
-        print(f'移除用户 {user_id} 权限时出错：{str(e)}')
-    return False
+        print(f'❌ 未知错误：移除用户 {user_id} 权限时出错 - {str(e)}')
+        import traceback
+        traceback.print_exc()
+        return False
 
 # 定时任务：检查并移除过期权限
 @tasks.loop(minutes=1)
@@ -451,11 +467,16 @@ async def check_expired_now(interaction: discord.Interaction):
             if member:
                 if role in member.roles:
                     # 用户有身份组，需要移除
+                    print(f'尝试移除用户 {member.name} ({user_id}) 的过期权限...')
                     if await remove_expired_role(user_id, guild, role):
                         removed_count += 1
+                    else:
+                        # 移除失败，记录详细信息
+                        print(f'⚠️ 移除用户 {member.name} ({user_id}) 的权限失败，请检查控制台日志')
                 else:
                     # 用户没有身份组，可能已经被移除了
                     already_removed_count += 1
+                    print(f'用户 {member.name} ({user_id}) 的身份组已被移除')
             else:
                 # 用户不在服务器中
                 print(f'用户 {user_id} 不在服务器中，但记录显示已过期')
@@ -469,6 +490,18 @@ async def check_expired_now(interaction: discord.Interaction):
             report_parts.append(f'🗑️ 移除了 {removed_count} 个过期权限')
         if already_removed_count > 0:
             report_parts.append(f'✅ {already_removed_count} 个用户的权限已被移除（可能之前已处理）')
+        
+        # 如果有过期用户但没有成功移除，说明有问题
+        failed_count = expired_count - removed_count - already_removed_count
+        if failed_count > 0:
+            report_parts.append(f'')
+            report_parts.append(f'⚠️ **警告**：有 {failed_count} 个过期用户的权限未能移除！')
+            report_parts.append(f'可能的原因：')
+            report_parts.append(f'1. 机器人的身份组位置低于会员身份组')
+            report_parts.append(f'2. 机器人没有"管理身份组"权限')
+            report_parts.append(f'3. 用户是服务器所有者（无法移除）')
+            report_parts.append(f'')
+            report_parts.append(f'💡 请查看控制台日志获取详细错误信息')
     else:
         report_parts.append(f'✨ 没有发现过期权限')
     
