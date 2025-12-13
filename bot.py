@@ -464,22 +464,37 @@ async def check_expired_now(interaction: discord.Interaction):
         if remaining is None:  # 已过期
             expired_count += 1
             member = guild.get_member(user_id)
+            
+            # 检查是否是服务器所有者
+            is_owner = guild.owner_id == user_id if guild.owner_id else False
+            
             if member:
                 if role in member.roles:
                     # 用户有身份组，需要移除
-                    print(f'尝试移除用户 {member.name} ({user_id}) 的过期权限...')
-                    if await remove_expired_role(user_id, guild, role):
-                        removed_count += 1
+                    if is_owner:
+                        # 服务器所有者无法移除身份组（Discord限制）
+                        print(f'⚠️ 用户 {member.name} ({user_id}) 是服务器所有者，无法自动移除身份组（Discord限制）')
+                        # 标记为已处理（虽然实际上无法移除）
+                        already_removed_count += 1
                     else:
-                        # 移除失败，记录详细信息
-                        print(f'⚠️ 移除用户 {member.name} ({user_id}) 的权限失败，请检查控制台日志')
+                        print(f'尝试移除用户 {member.name} ({user_id}) 的过期权限...')
+                        if await remove_expired_role(user_id, guild, role):
+                            removed_count += 1
+                        else:
+                            # 移除失败，记录详细信息
+                            print(f'⚠️ 移除用户 {member.name} ({user_id}) 的权限失败，请检查控制台日志')
                 else:
                     # 用户没有身份组，可能已经被移除了
                     already_removed_count += 1
                     print(f'用户 {member.name} ({user_id}) 的身份组已被移除')
+            elif is_owner:
+                # 服务器所有者可能不在缓存中，但我们可以检测到
+                print(f'⚠️ 用户 {user_id} 是服务器所有者，无法自动移除身份组（Discord限制）')
+                already_removed_count += 1
             else:
-                # 用户不在服务器中
-                print(f'用户 {user_id} 不在服务器中，但记录显示已过期')
+                # 用户不在服务器中或不在缓存中
+                print(f'⚠️ 用户 {user_id} 不在服务器缓存中，但记录显示已过期')
+                print(f'   提示：用户可能已离开服务器，或者需要启用 members intent 才能检测')
     
     # 构建报告消息
     report_parts = [f'✅ 检查完成！', f'📊 检查了 {checked_count} 个用户']
@@ -499,13 +514,65 @@ async def check_expired_now(interaction: discord.Interaction):
             report_parts.append(f'可能的原因：')
             report_parts.append(f'1. 机器人的身份组位置低于会员身份组')
             report_parts.append(f'2. 机器人没有"管理身份组"权限')
-            report_parts.append(f'3. 用户是服务器所有者（无法移除）')
+            report_parts.append(f'3. 用户不在服务器缓存中')
             report_parts.append(f'')
-            report_parts.append(f'💡 请查看控制台日志获取详细错误信息')
+            report_parts.append(f'💡 可以使用 `/removeuser <用户ID>` 命令删除该用户的记录')
     else:
         report_parts.append(f'✨ 没有发现过期权限')
     
     await interaction.followup.send('\n'.join(report_parts), ephemeral=True)
+
+@bot.tree.command(name='removeuser', description='删除指定用户的体验记录（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(user_id='要删除的用户ID')
+async def remove_user_record(interaction: discord.Interaction, user_id: str):
+    """删除指定用户的体验记录（仅管理员可用）"""
+    try:
+        user_id_int = int(user_id)
+    except ValueError:
+        await interaction.response.send_message('❌ 无效的用户ID格式！', ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    # 检查记录是否存在
+    user_info = get_user_info(user_id_int)
+    if not user_info:
+        await interaction.followup.send(f'❌ 用户 {user_id} 没有体验记录', ephemeral=True)
+        return
+    
+    # 删除记录
+    delete_user_info(user_id_int)
+    
+    # 尝试移除身份组（如果还在服务器中）
+    guild = interaction.guild
+    role = guild.get_role(VIP_ROLE_ID)
+    if role:
+        member = guild.get_member(user_id_int)
+        if member and role in member.roles:
+            try:
+                await member.remove_roles(role)
+                await interaction.followup.send(
+                    f'✅ 已删除用户 {user_id} 的记录，并移除了身份组',
+                    ephemeral=True
+                )
+            except Exception as e:
+                await interaction.followup.send(
+                    f'✅ 已删除用户 {user_id} 的记录\n'
+                    f'⚠️ 但移除身份组时出错：{str(e)}',
+                    ephemeral=True
+                )
+        else:
+            await interaction.followup.send(
+                f'✅ 已删除用户 {user_id} 的记录\n'
+                f'💡 用户不在服务器中或没有该身份组',
+                ephemeral=True
+            )
+    else:
+        await interaction.followup.send(
+            f'✅ 已删除用户 {user_id} 的记录',
+            ephemeral=True
+        )
 
 @bot.tree.command(name='sync', description='手动同步斜杠命令（仅管理员可用）')
 @app_commands.checks.has_permissions(administrator=True)
