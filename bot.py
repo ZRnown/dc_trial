@@ -175,20 +175,36 @@ class ExperienceView(discord.ui.View):
             guild = interaction.guild
             role = guild.get_role(VIP_ROLE_ID)
             if role:
-                removed = await remove_expired_role(user_id, guild, role)
-                if removed:
-                    await interaction.response.send_message(
-                        '⏰ 您的体验时间已结束！身份组已自动移除。',
-                        ephemeral=True
-                    )
+                member = guild.get_member(user_id)
+                if member:
+                    if role in member.roles:
+                        # 用户还有身份组，需要移除
+                        removed = await remove_expired_role(user_id, guild, role)
+                        if removed:
+                            await interaction.response.send_message(
+                                '⏰ 您的体验时间已结束！身份组已自动移除。',
+                                ephemeral=True
+                            )
+                        else:
+                            await interaction.response.send_message(
+                                '⏰ 您的体验时间已结束！但移除身份组时出错，请通知管理员。',
+                                ephemeral=True
+                            )
+                    else:
+                        # 用户已经没有身份组了
+                        await interaction.response.send_message(
+                            '⏰ 您的体验时间已结束！身份组已被移除。',
+                            ephemeral=True
+                        )
                 else:
+                    # 用户不在服务器中
                     await interaction.response.send_message(
                         '⏰ 您的体验时间已结束！',
                         ephemeral=True
                     )
             else:
                 await interaction.response.send_message(
-                    '⏰ 您的体验时间已结束！',
+                    '⏰ 您的体验时间已结束！但找不到会员身份组，请通知管理员。',
                     ephemeral=True
                 )
         else:
@@ -419,7 +435,9 @@ async def check_expired_now(interaction: discord.Interaction):
     conn.close()
     
     removed_count = 0
+    expired_count = 0
     checked_count = 0
+    already_removed_count = 0
     
     for user_id, start_time_str in users:
         if not start_time_str:
@@ -428,23 +446,33 @@ async def check_expired_now(interaction: discord.Interaction):
         checked_count += 1
         remaining = get_remaining_time(start_time_str)
         if remaining is None:  # 已过期
-            if await remove_expired_role(user_id, guild, role):
-                removed_count += 1
+            expired_count += 1
+            member = guild.get_member(user_id)
+            if member:
+                if role in member.roles:
+                    # 用户有身份组，需要移除
+                    if await remove_expired_role(user_id, guild, role):
+                        removed_count += 1
+                else:
+                    # 用户没有身份组，可能已经被移除了
+                    already_removed_count += 1
+            else:
+                # 用户不在服务器中
+                print(f'用户 {user_id} 不在服务器中，但记录显示已过期')
     
-    if removed_count > 0:
-        await interaction.followup.send(
-            f'✅ 检查完成！\n'
-            f'📊 检查了 {checked_count} 个用户\n'
-            f'🗑️ 移除了 {removed_count} 个过期权限',
-            ephemeral=True
-        )
+    # 构建报告消息
+    report_parts = [f'✅ 检查完成！', f'📊 检查了 {checked_count} 个用户']
+    
+    if expired_count > 0:
+        report_parts.append(f'⏰ 发现 {expired_count} 个过期用户')
+        if removed_count > 0:
+            report_parts.append(f'🗑️ 移除了 {removed_count} 个过期权限')
+        if already_removed_count > 0:
+            report_parts.append(f'✅ {already_removed_count} 个用户的权限已被移除（可能之前已处理）')
     else:
-        await interaction.followup.send(
-            f'✅ 检查完成！\n'
-            f'📊 检查了 {checked_count} 个用户\n'
-            f'✨ 没有发现过期权限',
-            ephemeral=True
-        )
+        report_parts.append(f'✨ 没有发现过期权限')
+    
+    await interaction.followup.send('\n'.join(report_parts), ephemeral=True)
 
 @bot.tree.command(name='sync', description='手动同步斜杠命令（仅管理员可用）')
 @app_commands.checks.has_permissions(administrator=True)
