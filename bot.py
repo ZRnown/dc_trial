@@ -20,6 +20,8 @@ EXPERIENCE_DURATION_HOURS = 2  # 体验时长2小时
 def init_db():
     conn = sqlite3.connect('vip_experience.db')
     c = conn.cursor()
+    
+    # 体验会员表（保留原有功能）
     c.execute('''
         CREATE TABLE IF NOT EXISTS user_experience (
             user_id INTEGER PRIMARY KEY,
@@ -27,6 +29,30 @@ def init_db():
             used INTEGER DEFAULT 0
         )
     ''')
+    
+    # 身份组配置表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS role_configs (
+            role_id INTEGER PRIMARY KEY,
+            role_name TEXT,
+            duration_days INTEGER,
+            created_at TEXT
+        )
+    ''')
+    
+    # 用户身份组记录表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            role_id INTEGER,
+            start_time TEXT,
+            end_time TEXT,
+            duration_days INTEGER,
+            FOREIGN KEY (role_id) REFERENCES role_configs(role_id)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -63,6 +89,100 @@ def delete_user_info(user_id):
     conn = sqlite3.connect('vip_experience.db')
     c = conn.cursor()
     c.execute('DELETE FROM user_experience WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+# ========== 身份组配置相关函数 ==========
+
+# 添加身份组配置
+def add_role_config(role_id, role_name, duration_days):
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO role_configs (role_id, role_name, duration_days, created_at)
+        VALUES (?, ?, ?, ?)
+    ''', (role_id, role_name, duration_days, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+# 获取所有身份组配置
+def get_all_role_configs():
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('SELECT role_id, role_name, duration_days FROM role_configs')
+    results = c.fetchall()
+    conn.close()
+    return results
+
+# 获取身份组配置
+def get_role_config(role_id):
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('SELECT role_id, role_name, duration_days FROM role_configs WHERE role_id = ?', (role_id,))
+    result = c.fetchone()
+    conn.close()
+    return result
+
+# 删除身份组配置
+def delete_role_config(role_id):
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM role_configs WHERE role_id = ?', (role_id,))
+    conn.commit()
+    conn.close()
+
+# ========== 用户身份组记录相关函数 ==========
+
+# 添加用户身份组记录
+def add_user_role(user_id, role_id, duration_days):
+    start_time = datetime.now()
+    end_time = start_time + timedelta(days=duration_days)
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO user_roles (user_id, role_id, start_time, end_time, duration_days)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_id, role_id, start_time.isoformat(), end_time.isoformat(), duration_days))
+    conn.commit()
+    conn.close()
+    return end_time
+
+# 获取用户的所有身份组记录
+def get_user_roles(user_id):
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('''
+        SELECT ur.id, ur.role_id, ur.start_time, ur.end_time, ur.duration_days, rc.role_name
+        FROM user_roles ur
+        LEFT JOIN role_configs rc ON ur.role_id = rc.role_id
+        WHERE ur.user_id = ?
+        ORDER BY ur.end_time DESC
+    ''', (user_id,))
+    results = c.fetchall()
+    conn.close()
+    return results
+
+# 获取所有未过期的用户身份组记录
+def get_all_active_user_roles():
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    c.execute('''
+        SELECT ur.id, ur.user_id, ur.role_id, ur.start_time, ur.end_time, ur.duration_days, rc.role_name
+        FROM user_roles ur
+        LEFT JOIN role_configs rc ON ur.role_id = rc.role_id
+        WHERE ur.end_time > ?
+        ORDER BY ur.end_time ASC
+    ''', (now,))
+    results = c.fetchall()
+    conn.close()
+    return results
+
+# 删除用户身份组记录
+def delete_user_role(record_id):
+    conn = sqlite3.connect('vip_experience.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM user_roles WHERE id = ?', (record_id,))
     conn.commit()
     conn.close()
 
@@ -174,37 +294,53 @@ class ExperienceView(discord.ui.View):
             # 如果已过期，立即移除身份组
             guild = interaction.guild
             role = guild.get_role(VIP_ROLE_ID)
-            if role:
-                member = guild.get_member(user_id)
-                if member:
-                    if role in member.roles:
-                        # 用户还有身份组，需要移除
-                        removed = await remove_expired_role(user_id, guild, role)
-                        if removed:
-                            await interaction.response.send_message(
-                                '⏰ 您的体验时间已结束！身份组已自动移除。',
-                                ephemeral=True
-                            )
-                        else:
-                            await interaction.response.send_message(
-                                '⏰ 您的体验时间已结束！但移除身份组时出错，请通知管理员。',
-                                ephemeral=True
-                            )
-                    else:
-                        # 用户已经没有身份组了
-                        await interaction.response.send_message(
-                            '⏰ 您的体验时间已结束！身份组已被移除。',
-                            ephemeral=True
-                        )
-                else:
-                    # 用户不在服务器中
-                    await interaction.response.send_message(
-                        '⏰ 您的体验时间已结束！',
-                        ephemeral=True
-                    )
-            else:
+            if not role:
                 await interaction.response.send_message(
                     '⏰ 您的体验时间已结束！但找不到会员身份组，请通知管理员。',
+                    ephemeral=True
+                )
+                return
+            
+            member = guild.get_member(user_id)
+            if not member:
+                await interaction.response.send_message(
+                    '⏰ 您的体验时间已结束！',
+                    ephemeral=True
+                )
+                return
+            
+            if role not in member.roles:
+                # 用户已经没有身份组了
+                await interaction.response.send_message(
+                    '⏰ 您的体验时间已结束！身份组已被移除。',
+                    ephemeral=True
+                )
+                return
+            
+            # 用户还有身份组，需要移除
+            try:
+                await member.remove_roles(role)
+                print(f'✅ [查询时长] 已移除用户 {member.name} ({user_id}) 的体验权限')
+                await interaction.response.send_message(
+                    '⏰ 您的体验时间已结束！身份组已自动移除。',
+                    ephemeral=True
+                )
+            except discord.Forbidden:
+                print(f'❌ [查询时长] 权限不足：无法移除用户 {member.name} ({user_id}) 的身份组')
+                print(f'   提示：确保机器人的身份组在服务器身份组列表中位于会员身份组之上')
+                await interaction.response.send_message(
+                    '⏰ 您的体验时间已结束！\n'
+                    '❌ 但移除身份组时权限不足，请通知管理员检查机器人权限。',
+                    ephemeral=True
+                )
+            except Exception as e:
+                print(f'❌ [查询时长] 移除用户 {member.name} ({user_id}) 权限时出错：{str(e)}')
+                import traceback
+                traceback.print_exc()
+                await interaction.response.send_message(
+                    f'⏰ 您的体验时间已结束！\n'
+                    f'❌ 但移除身份组时出错：{str(e)}\n'
+                    f'请通知管理员。',
                     ephemeral=True
                 )
         else:
@@ -260,24 +396,59 @@ async def check_expired_roles():
         if not guild:
             return
         
-        role = guild.get_role(VIP_ROLE_ID)
-        if not role:
-            return
+        # 检查体验会员（原有功能）
+        if VIP_ROLE_ID:
+            role = guild.get_role(VIP_ROLE_ID)
+            if role:
+                conn = sqlite3.connect('vip_experience.db')
+                c = conn.cursor()
+                c.execute('SELECT user_id, start_time FROM user_experience WHERE used = 1')
+                users = c.fetchall()
+                conn.close()
+                
+                for user_id, start_time_str in users:
+                    if not start_time_str:
+                        continue
+                    
+                    remaining = get_remaining_time(start_time_str)
+                    if remaining is None:  # 已过期
+                        member = guild.get_member(user_id)
+                        if member and role in member.roles:
+                            try:
+                                await member.remove_roles(role)
+                                print(f'✅ [定时任务] 已移除用户 {member.name} ({user_id}) 的体验权限')
+                            except discord.Forbidden:
+                                print(f'❌ [定时任务] 权限不足：无法移除用户 {member.name} ({user_id}) 的身份组')
+                            except Exception as e:
+                                print(f'❌ [定时任务] 移除用户 {member.name} ({user_id}) 权限时出错：{str(e)}')
         
-        conn = sqlite3.connect('vip_experience.db')
-        c = conn.cursor()
-        c.execute('SELECT user_id, start_time FROM user_experience WHERE used = 1')
-        users = c.fetchall()
-        conn.close()
+        # 检查手动赋予的身份组
+        active_roles = get_all_active_user_roles()
+        now = datetime.now()
         
-        for user_id, start_time_str in users:
-            if not start_time_str:
-                continue
+        for record in active_roles:
+            record_id, user_id, role_id, start_time_str, end_time_str, duration_days, role_name = record
+            end_time = datetime.fromisoformat(end_time_str)
             
-            remaining = get_remaining_time(start_time_str)
-            if remaining is None:  # 已过期
-                await remove_expired_role(user_id, guild, role)
-                # 注意：即使用户离开服务器，也不删除记录，确保每人只有一次机会
+            if now >= end_time:  # 已过期
+                try:
+                    role = guild.get_role(role_id)
+                    if role:
+                        member = guild.get_member(user_id)
+                        if member and role in member.roles:
+                            await member.remove_roles(role)
+                            delete_user_role(record_id)
+                            print(f'✅ 已移除用户 {member.name} ({user_id}) 的身份组 {role_name or role_id}（记录ID: {record_id}）')
+                        else:
+                            # 用户不在服务器或没有身份组，删除记录
+                            delete_user_role(record_id)
+                            print(f'已删除过期记录：用户 {user_id} 的身份组 {role_name or role_id}（记录ID: {record_id}）')
+                    else:
+                        # 身份组不存在，删除记录
+                        delete_user_role(record_id)
+                        print(f'身份组 {role_id} 不存在，已删除记录（记录ID: {record_id}）')
+                except Exception as e:
+                    print(f'移除用户 {user_id} 身份组 {role_id} 时出错：{str(e)}')
     except Exception as e:
         print(f'检查过期权限时出错：{str(e)}')
 
@@ -433,12 +604,16 @@ async def check_expired_now(interaction: discord.Interaction):
                         # 标记为已处理（虽然实际上无法移除）
                         already_removed_count += 1
                     else:
-                        print(f'尝试移除用户 {member.name} ({user_id}) 的过期权限...')
-                        if await remove_expired_role(user_id, guild, role):
+                        # 直接尝试移除
+                        try:
+                            await member.remove_roles(role)
                             removed_count += 1
-                        else:
-                            # 移除失败，记录详细信息
-                            print(f'⚠️ 移除用户 {member.name} ({user_id}) 的权限失败，请检查控制台日志')
+                            print(f'✅ [checkexpired] 已移除用户 {member.name} ({user_id}) 的体验权限')
+                        except discord.Forbidden:
+                            print(f'❌ [checkexpired] 权限不足：无法移除用户 {member.name} ({user_id}) 的身份组')
+                            print(f'   提示：确保机器人的身份组在服务器身份组列表中位于会员身份组之上')
+                        except Exception as e:
+                            print(f'❌ [checkexpired] 移除用户 {member.name} ({user_id}) 权限时出错：{str(e)}')
                 else:
                     # 用户没有身份组，可能已经被移除了
                     already_removed_count += 1
@@ -477,6 +652,224 @@ async def check_expired_now(interaction: discord.Interaction):
         report_parts.append(f'✨ 没有发现过期权限')
     
     await interaction.followup.send('\n'.join(report_parts), ephemeral=True)
+
+# ========== 身份组管理命令 ==========
+
+@bot.tree.command(name='addrole', description='添加身份组配置（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role='要配置的身份组', days='有效期天数')
+async def add_role_config_cmd(interaction: discord.Interaction, role: discord.Role, days: int):
+    """添加身份组配置"""
+    if days <= 0:
+        await interaction.response.send_message('❌ 天数必须大于0！', ephemeral=True)
+        return
+    
+    add_role_config(role.id, role.name, days)
+    await interaction.response.send_message(
+        f'✅ 已添加身份组配置：\n'
+        f'身份组：{role.mention} ({role.name})\n'
+        f'有效期：{days} 天',
+        ephemeral=True
+    )
+
+@bot.tree.command(name='listroles', description='查看所有身份组配置（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+async def list_role_configs_cmd(interaction: discord.Interaction):
+    """查看所有身份组配置"""
+    configs = get_all_role_configs()
+    
+    if not configs:
+        await interaction.response.send_message('📋 当前没有配置的身份组', ephemeral=True)
+        return
+    
+    embed = discord.Embed(title='📋 身份组配置列表', color=discord.Color.blue())
+    guild = interaction.guild
+    
+    for role_id, role_name, duration_days in configs:
+        role = guild.get_role(role_id)
+        if role:
+            role_mention = role.mention
+        else:
+            role_mention = f'身份组已删除 (ID: {role_id})'
+        
+        embed.add_field(
+            name=role_name or f'ID: {role_id}',
+            value=f'身份组: {role_mention}\n有效期: {duration_days} 天',
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name='removerole', description='删除身份组配置（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(role='要删除配置的身份组')
+async def remove_role_config_cmd(interaction: discord.Interaction, role: discord.Role):
+    """删除身份组配置"""
+    config = get_role_config(role.id)
+    if not config:
+        await interaction.response.send_message(f'❌ 身份组 {role.mention} 没有配置', ephemeral=True)
+        return
+    
+    delete_role_config(role.id)
+    await interaction.response.send_message(
+        f'✅ 已删除身份组配置：{role.mention}',
+        ephemeral=True
+    )
+
+@bot.tree.command(name='givemember', description='赋予用户身份组（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(member='要赋予身份组的用户', role='要赋予的身份组', days='有效期天数（可选，默认使用配置）')
+async def give_member_role_cmd(interaction: discord.Interaction, member: discord.Member, role: discord.Role, days: int = None):
+    """赋予用户身份组"""
+    # 检查身份组是否已配置
+    config = get_role_config(role.id)
+    if not config and days is None:
+        await interaction.response.send_message(
+            f'❌ 身份组 {role.mention} 未配置！\n'
+            f'请先使用 `/addrole` 配置身份组，或在此命令中指定天数。',
+            ephemeral=True
+        )
+        return
+    
+    # 确定天数
+    if days is None:
+        duration_days = config[2]  # 使用配置的天数
+    else:
+        if days <= 0:
+            await interaction.response.send_message('❌ 天数必须大于0！', ephemeral=True)
+            return
+        duration_days = days
+    
+    try:
+        # 赋予身份组
+        await member.add_roles(role)
+        
+        # 记录到数据库
+        end_time = add_user_role(member.id, role.id, duration_days)
+        
+        await interaction.response.send_message(
+            f'✅ 已赋予用户 {member.mention} 身份组 {role.mention}\n'
+            f'⏰ 有效期：{duration_days} 天\n'
+            f'📅 到期时间：{end_time.strftime("%Y-%m-%d %H:%M:%S")}',
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            '❌ 错误：机器人没有权限赋予身份组！',
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f'❌ 发生错误：{str(e)}',
+            ephemeral=True
+        )
+
+@bot.tree.command(name='checkmember', description='查看用户的所有身份组记录（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(member='要查看的用户')
+async def check_member_roles_cmd(interaction: discord.Interaction, member: discord.Member):
+    """查看用户的所有身份组记录"""
+    records = get_user_roles(member.id)
+    
+    if not records:
+        await interaction.response.send_message(
+            f'📋 用户 {member.mention} 没有身份组记录',
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title=f'📋 {member.display_name} 的身份组记录',
+        color=discord.Color.blue()
+    )
+    
+    for record in records:
+        record_id, role_id, start_time_str, end_time_str, duration_days, role_name = record
+        start_time = datetime.fromisoformat(start_time_str)
+        end_time = datetime.fromisoformat(end_time_str)
+        now = datetime.now()
+        
+        role = interaction.guild.get_role(role_id)
+        if role:
+            role_display = role.mention
+        else:
+            role_display = f'身份组已删除 (ID: {role_id})'
+        
+        if now >= end_time:
+            status = '⏰ 已过期'
+        else:
+            remaining = end_time - now
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            status = f'⏳ 剩余 {days}天{hours}小时'
+        
+        embed.add_field(
+            name=f'{role_name or f"ID: {role_id}"} (记录ID: {record_id})',
+            value=(
+                f'身份组: {role_display}\n'
+                f'开始: {start_time.strftime("%Y-%m-%d %H:%M:%S")}\n'
+                f'到期: {end_time.strftime("%Y-%m-%d %H:%M:%S")}\n'
+                f'状态: {status}'
+            ),
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name='listmembers', description='查看所有有身份组记录的用户（仅管理员可用）')
+@app_commands.checks.has_permissions(administrator=True)
+async def list_members_with_roles_cmd(interaction: discord.Interaction):
+    """查看所有有身份组记录的用户"""
+    active_roles = get_all_active_user_roles()
+    
+    if not active_roles:
+        await interaction.response.send_message('📋 当前没有活跃的身份组记录', ephemeral=True)
+        return
+    
+    embed = discord.Embed(title='📋 活跃身份组记录', color=discord.Color.blue())
+    guild = interaction.guild
+    
+    # 按用户分组
+    user_records = {}
+    for record in active_roles:
+        record_id, user_id, role_id, start_time_str, end_time_str, duration_days, role_name = record
+        if user_id not in user_records:
+            user_records[user_id] = []
+        user_records[user_id].append(record)
+    
+    for user_id, records in list(user_records.items())[:10]:  # 最多显示10个用户
+        member = guild.get_member(user_id)
+        if member:
+            username = member.display_name
+        else:
+            username = f'用户ID: {user_id}'
+        
+        roles_info = []
+        for record in records:
+            record_id, _, role_id, _, end_time_str, _, role_name = record
+            end_time = datetime.fromisoformat(end_time_str)
+            remaining = end_time - datetime.now()
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            
+            role = guild.get_role(role_id)
+            if role:
+                role_display = role.name
+            else:
+                role_display = f'ID: {role_id}'
+            
+            roles_info.append(f'{role_display}: 剩余{days}天{hours}小时')
+        
+        embed.add_field(
+            name=username,
+            value='\n'.join(roles_info),
+            inline=False
+        )
+    
+    if len(user_records) > 10:
+        embed.set_footer(text=f'仅显示前10个用户，共{len(user_records)}个用户')
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # 运行机器人
 if __name__ == '__main__':
