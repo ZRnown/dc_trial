@@ -14,7 +14,7 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD_ID = int(os.getenv('GUILD_ID', 0))
 VIP_ROLE_ID = int(os.getenv('VIP_ROLE_ID', 0))
-EXPERIENCE_DURATION_HOURS = 2  # 体验时长2小时
+EXPERIENCE_DURATION_HOURS = 0.01  # 体验时长2小时
 
 # 数据库初始化
 def init_db():
@@ -201,17 +201,85 @@ def get_remaining_time(start_time_str):
 # 创建机器人
 intents = discord.Intents.default()
 intents.message_content = True
-# 注意：不使用 members intent（特权意图），改用 get_member() 从缓存获取
+intents.members = True  # 必须开启，机器人才能在后台看到所有成员
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # 错误处理：权限不足
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message('❌ 您没有权限使用此命令！', ephemeral=True)
-    else:
-        await interaction.response.send_message(f'❌ 发生错误：{str(error)}', ephemeral=True)
-        raise error
+    try:
+        if isinstance(error, app_commands.MissingPermissions):
+            if not interaction.response.is_done():
+                await interaction.response.send_message('❌ 您没有权限使用此命令！', ephemeral=True)
+            else:
+                await interaction.followup.send('❌ 您没有权限使用此命令！', ephemeral=True)
+        else:
+            # 检查交互是否已经响应
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f'❌ 发生错误：{str(error)}', ephemeral=True)
+            else:
+                # 如果已经响应过，使用 followup
+                await interaction.followup.send(f'❌ 发生错误：{str(error)}', ephemeral=True)
+    except discord.errors.NotFound:
+        # 交互已过期，无法响应
+        print(f'⚠️ 交互已过期，无法发送错误消息：{str(error)}')
+    except Exception as e:
+        print(f'❌ 错误处理时发生异常：{str(e)}')
+        import traceback
+        traceback.print_exc()
+
+# 翻页视图
+class PaginatedView(discord.ui.View):
+    def __init__(self, pages, initial_page=0):
+        super().__init__(timeout=300)  # 5分钟超时
+        self.pages = pages
+        self.current_page = initial_page
+        self.max_page = len(pages) - 1
+        self.update_buttons()
+    
+    def update_buttons(self):
+        # 清除所有按钮
+        self.clear_items()
+        
+        # 上一页按钮
+        prev_button = discord.ui.Button(
+            label='上一页',
+            style=discord.ButtonStyle.primary,
+            emoji='◀️',
+            disabled=self.current_page == 0
+        )
+        prev_button.callback = self.previous_page
+        self.add_item(prev_button)
+        
+        # 页码显示
+        page_button = discord.ui.Button(
+            label=f'{self.current_page + 1}/{self.max_page + 1}',
+            style=discord.ButtonStyle.secondary,
+            disabled=True
+        )
+        self.add_item(page_button)
+        
+        # 下一页按钮
+        next_button = discord.ui.Button(
+            label='下一页',
+            style=discord.ButtonStyle.primary,
+            emoji='▶️',
+            disabled=self.current_page >= self.max_page
+        )
+        next_button.callback = self.next_page
+        self.add_item(next_button)
+    
+    async def previous_page(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+    
+    async def next_page(self, interaction: discord.Interaction):
+        if self.current_page < self.max_page:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
 # 按钮视图
 class ExperienceView(discord.ui.View):
@@ -412,8 +480,21 @@ async def check_expired_roles():
                     
                     remaining = get_remaining_time(start_time_str)
                     if remaining is None:  # 已过期
+                        # 先从缓存获取
                         member = guild.get_member(user_id)
-                        if member and role in member.roles:
+                        if member is None:
+                            try:
+                                # 如果缓存里没有，尝试从API获取（兜底方案）
+                                member = await guild.fetch_member(user_id)
+                            except discord.NotFound:
+                                print(f'⚠️ 用户 {user_id} 已离开服务器，跳过移除')
+                                continue
+                            except Exception as e:
+                                print(f'❌ 获取用户 {user_id} 失败: {e}')
+                                continue
+                        
+                        # 此时 member 一定不为 None
+                        if role in member.roles:
                             try:
                                 await member.remove_roles(role)
                                 print(f'✅ [定时任务] 已移除用户 {member.name} ({user_id}) 的体验权限')
@@ -432,23 +513,46 @@ async def check_expired_roles():
             
             if now >= end_time:  # 已过期
                 try:
-                    role = guild.get_role(role_id)
-                    if role:
-                        member = guild.get_member(user_id)
-                        if member and role in member.roles:
-                            await member.remove_roles(role)
-                            delete_user_role(record_id)
-                            print(f'✅ 已移除用户 {member.name} ({user_id}) 的身份组 {role_name or role_id}（记录ID: {record_id}）')
-                        else:
-                            # 用户不在服务器或没有身份组，删除记录
-                            delete_user_role(record_id)
-                            print(f'已删除过期记录：用户 {user_id} 的身份组 {role_name or role_id}（记录ID: {record_id}）')
-                    else:
+                    role_obj = guild.get_role(role_id)
+                    if not role_obj:
                         # 身份组不存在，删除记录
                         delete_user_role(record_id)
                         print(f'身份组 {role_id} 不存在，已删除记录（记录ID: {record_id}）')
+                        continue
+                    
+                    # 先从缓存获取
+                    member = guild.get_member(user_id)
+                    if member is None:
+                        try:
+                            # 如果缓存里没有，尝试从API获取（兜底方案）
+                            member = await guild.fetch_member(user_id)
+                        except discord.NotFound:
+                            # 用户已离开服务器，删除记录
+                            delete_user_role(record_id)
+                            print(f'用户 {user_id} 已离开服务器，已删除记录（记录ID: {record_id}）')
+                            continue
+                        except Exception as e:
+                            print(f'❌ 获取用户 {user_id} 失败: {e}')
+                            continue
+                    
+                    # 此时 member 一定不为 None
+                    if role_obj in member.roles:
+                        try:
+                            await member.remove_roles(role_obj)
+                            delete_user_role(record_id)
+                            print(f'✅ [定时任务] 已移除用户 {member.name} ({user_id}) 的身份组 {role_name or role_id}（记录ID: {record_id}）')
+                        except discord.Forbidden:
+                            print(f'❌ [定时任务] 权限不足：无法移除用户 {member.name} ({user_id}) 的身份组 {role_id}')
+                        except Exception as e:
+                            print(f'❌ [定时任务] 移除用户 {member.name} ({user_id}) 身份组 {role_id} 时出错：{str(e)}')
+                    else:
+                        # 用户没有身份组，删除记录
+                        delete_user_role(record_id)
+                        print(f'用户 {member.name} ({user_id}) 没有身份组 {role_id}，已删除记录（记录ID: {record_id}）')
                 except Exception as e:
-                    print(f'移除用户 {user_id} 身份组 {role_id} 时出错：{str(e)}')
+                    print(f'❌ 处理用户 {user_id} 身份组 {role_id} 时出错：{str(e)}')
+                    import traceback
+                    traceback.print_exc()
     except Exception as e:
         print(f'检查过期权限时出错：{str(e)}')
 
@@ -502,14 +606,29 @@ async def setup_experience(interaction: discord.Interaction):
         inline=False
     )
     
+    # 计算体验时长显示
+    if EXPERIENCE_DURATION_HOURS < 1:
+        duration_minutes = int(EXPERIENCE_DURATION_HOURS * 60)
+        duration_display = f'{duration_minutes}分钟'
+    else:
+        duration_display = f'{EXPERIENCE_DURATION_HOURS}小时'
+    
     embed.add_field(
         name='⏰ 体验时长',
-        value=f'{EXPERIENCE_DURATION_HOURS}小时',
+        value=duration_display,
         inline=False
     )
     
     view = ExperienceView()
-    await interaction.response.send_message(embed=embed, view=view)
+    try:
+        await interaction.response.send_message(embed=embed, view=view)
+    except discord.errors.NotFound:
+        # 交互已过期
+        print('⚠️ setup 命令：交互已过期，无法发送消息')
+    except Exception as e:
+        print(f'❌ setup 命令出错：{str(e)}')
+        import traceback
+        traceback.print_exc()
 
 @bot.tree.command(name='checkall', description='查看所有体验用户信息（仅管理员可用）')
 @app_commands.checks.has_permissions(administrator=True)
@@ -820,13 +939,14 @@ async def check_member_roles_cmd(interaction: discord.Interaction, member: disco
 @app_commands.checks.has_permissions(administrator=True)
 async def list_members_with_roles_cmd(interaction: discord.Interaction):
     """查看所有有身份组记录的用户"""
+    await interaction.response.defer(ephemeral=True)
+    
     active_roles = get_all_active_user_roles()
     
     if not active_roles:
-        await interaction.response.send_message('📋 当前没有活跃的身份组记录', ephemeral=True)
+        await interaction.followup.send('📋 当前没有活跃的身份组记录', ephemeral=True)
         return
     
-    embed = discord.Embed(title='📋 活跃身份组记录', color=discord.Color.blue())
     guild = interaction.guild
     
     # 按用户分组
@@ -837,39 +957,64 @@ async def list_members_with_roles_cmd(interaction: discord.Interaction):
             user_records[user_id] = []
         user_records[user_id].append(record)
     
-    for user_id, records in list(user_records.items())[:10]:  # 最多显示10个用户
-        member = guild.get_member(user_id)
-        if member:
-            username = member.display_name
-        else:
-            username = f'用户ID: {user_id}'
+    # 转换为列表并按用户ID排序
+    user_list = list(user_records.items())
+    user_list.sort(key=lambda x: x[0])
+    
+    # 每页显示10个用户（Discord embed最多25个字段，留一些余量）
+    items_per_page = 10
+    total_pages = (len(user_list) + items_per_page - 1) // items_per_page
+    
+    # 生成所有页面
+    pages = []
+    for page_num in range(total_pages):
+        start_idx = page_num * items_per_page
+        end_idx = min(start_idx + items_per_page, len(user_list))
         
-        roles_info = []
-        for record in records:
-            record_id, _, role_id, _, end_time_str, _, role_name = record
-            end_time = datetime.fromisoformat(end_time_str)
-            remaining = end_time - datetime.now()
-            days = remaining.days
-            hours = remaining.seconds // 3600
-            
-            role = guild.get_role(role_id)
-            if role:
-                role_display = role.name
-            else:
-                role_display = f'ID: {role_id}'
-            
-            roles_info.append(f'{role_display}: 剩余{days}天{hours}小时')
-        
-        embed.add_field(
-            name=username,
-            value='\n'.join(roles_info),
-            inline=False
+        embed = discord.Embed(
+            title='📋 活跃身份组记录',
+            description=f'共 {len(user_list)} 个用户',
+            color=discord.Color.blue()
         )
+        
+        for user_id, records in user_list[start_idx:end_idx]:
+            member = guild.get_member(user_id)
+            if member:
+                username = member.display_name
+            else:
+                username = f'用户ID: {user_id}'
+            
+            roles_info = []
+            for record in records:
+                record_id, _, role_id, _, end_time_str, _, role_name = record
+                end_time = datetime.fromisoformat(end_time_str)
+                remaining = end_time - datetime.now()
+                days = remaining.days
+                hours = remaining.seconds // 3600
+                
+                role = guild.get_role(role_id)
+                if role:
+                    role_display = role.name
+                else:
+                    role_display = f'ID: {role_id}'
+                
+                roles_info.append(f'{role_display}: 剩余{days}天{hours}小时')
+            
+            embed.add_field(
+                name=username,
+                value='\n'.join(roles_info) if roles_info else '无身份组信息',
+                inline=False
+            )
+        
+        embed.set_footer(text=f'第 {page_num + 1} 页，共 {total_pages} 页')
+        pages.append(embed)
     
-    if len(user_records) > 10:
-        embed.set_footer(text=f'仅显示前10个用户，共{len(user_records)}个用户')
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    # 发送第一页
+    if total_pages > 1:
+        view = PaginatedView(pages, initial_page=0)
+        await interaction.followup.send(embed=pages[0], view=view, ephemeral=True)
+    else:
+        await interaction.followup.send(embed=pages[0], ephemeral=True)
 
 # 运行机器人
 if __name__ == '__main__':
