@@ -634,6 +634,8 @@ async def setup_experience(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def check_all_users(interaction: discord.Interaction):
     """查看所有体验用户信息（仅管理员可用）"""
+    await interaction.response.defer(ephemeral=True)
+    
     conn = sqlite3.connect('vip_experience.db')
     c = conn.cursor()
     c.execute('SELECT user_id, start_time, used FROM user_experience WHERE used = 1')
@@ -641,38 +643,61 @@ async def check_all_users(interaction: discord.Interaction):
     conn.close()
     
     if not users:
-        await interaction.response.send_message('📋 当前没有体验用户')
+        await interaction.followup.send('📋 当前没有体验用户', ephemeral=True)
         return
     
-    embed = discord.Embed(title='📋 体验用户列表', color=discord.Color.blue())
     guild = interaction.guild
     
-    for user_id, start_time_str, used in users:
-        member = guild.get_member(user_id)
-        if member:
-            username = member.display_name
-        else:
-            username = f'用户ID: {user_id} (不在服务器或不在缓存中)'
-        
-        if start_time_str:
-            remaining = get_remaining_time(start_time_str)
-            if remaining:
-                total_seconds = int(remaining.total_seconds())
-                hours = total_seconds // 3600
-                minutes = (total_seconds % 3600) // 60
-                status = f'⏳ 剩余 {hours}小时{minutes}分钟'
-            else:
-                status = '⏰ 已过期'
-        else:
-            status = '❌ 无开始时间'
-        
-        embed.add_field(
-            name=username,
-            value=f'开始时间: {start_time_str or "无"}\n状态: {status}',
-            inline=False
-        )
+    # 每页显示20个用户（Discord embed最多25个字段，留一些余量）
+    items_per_page = 20
+    total_pages = (len(users) + items_per_page - 1) // items_per_page
     
-    await interaction.response.send_message(embed=embed)
+    # 生成所有页面
+    pages = []
+    for page_num in range(total_pages):
+        start_idx = page_num * items_per_page
+        end_idx = min(start_idx + items_per_page, len(users))
+        
+        embed = discord.Embed(
+            title='📋 体验用户列表',
+            description=f'共 {len(users)} 个体验用户',
+            color=discord.Color.blue()
+        )
+        
+        for user_id, start_time_str, used in users[start_idx:end_idx]:
+            member = guild.get_member(user_id)
+            if member:
+                username = member.display_name
+            else:
+                username = f'用户ID: {user_id} (不在服务器或不在缓存中)'
+            
+            if start_time_str:
+                remaining = get_remaining_time(start_time_str)
+                if remaining:
+                    total_seconds = int(remaining.total_seconds())
+                    hours = total_seconds // 3600
+                    minutes = (total_seconds % 3600) // 60
+                    status = f'⏳ 剩余 {hours}小时{minutes}分钟'
+                else:
+                    status = '⏰ 已过期'
+            else:
+                status = '❌ 无开始时间'
+            
+            embed.add_field(
+                name=username,
+                value=f'开始时间: {start_time_str or "无"}\n状态: {status}',
+                inline=False
+            )
+        
+        embed.set_footer(text=f'第 {page_num + 1} 页，共 {total_pages} 页')
+        pages.append(embed)
+    
+    # 发送第一页
+    if total_pages > 1:
+        view = PaginatedView(pages, initial_page=0)
+        await interaction.followup.send(embed=pages[0], view=view, ephemeral=True)
+    else:
+        await interaction.followup.send(embed=pages[0], ephemeral=True)
 
 @bot.tree.command(name='checkexpired', description='立即检查并移除所有过期的体验权限（仅管理员可用）')
 @app_commands.checks.has_permissions(administrator=True)
